@@ -1,0 +1,724 @@
+{
+  "definition": {
+    "metadata": {
+      "notes": {}
+    },
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "When_an_HTTP_request_is_received": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "method": "POST",
+          "schema": {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "groupTag": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "serialNumber": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "hardwareIdentifier": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "productKey": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "assignedUserPrincipalName": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ITSupporter": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "Initialize_status_variables": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "ImportState",
+              "type": "object",
+              "value": {}
+            },
+            {
+              "name": "ImportPollError",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "name": "ProfileAssigned",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "name": "ProfilePollError",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "name": "ProfileChecks",
+              "type": "integer",
+              "value": 0
+            },
+            {
+              "name": "ProfileDeadline",
+              "type": "string"
+            },
+            {
+              "name": "SupporterEmail",
+              "type": "string",
+              "value": "@if(empty(triggerBody()?['ITSupporter']), parameters('SupportEmail'), triggerBody()?['ITSupporter'])"
+            },
+            {
+              "name": "NotificationSender",
+              "type": "string",
+              "value": "@parameters('NotificationSender')"
+            },
+            {
+              "name": "EmailGreeting",
+              "type": "string",
+              "value": "@parameters('EmailGreeting')"
+            },
+            {
+              "name": "EmailClosing",
+              "type": "string",
+              "value": "@parameters('EmailClosing')"
+            },
+            {
+              "name": "EmailTemplates",
+              "type": "object",
+              "value": "@parameters('EmailTemplates')"
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Validate_required_fields": {
+        "type": "If",
+        "expression": "@and(not(empty(trim(string(coalesce(triggerBody()?['groupTag'], ''))))),not(empty(trim(string(coalesce(triggerBody()?['serialNumber'], ''))))),not(empty(trim(string(coalesce(triggerBody()?['hardwareIdentifier'], ''))))))",
+        "actions": {
+          "Import_device_scope": {
+            "type": "Scope",
+            "actions": {
+              "Graph_import_Autopilot_device": {
+                "type": "Http",
+                "inputs": {
+                  "uri": "https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities/import",
+                  "method": "POST",
+                  "headers": {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json"
+                  },
+                  "body": {
+                    "importedWindowsAutopilotDeviceIdentities": [
+                      {
+                        "@@odata.type": "#microsoft.graph.importedWindowsAutopilotDeviceIdentity",
+                        "groupTag": "@{triggerBody()?['groupTag']}",
+                        "serialNumber": "@{triggerBody()?['serialNumber']}",
+                        "productKey": "@{coalesce(triggerBody()?['productKey'],'')}",
+                        "hardwareIdentifier": "@{triggerBody()?['hardwareIdentifier']}",
+                        "assignedUserPrincipalName": "@{coalesce(triggerBody()?['assignedUserPrincipalName'],'')}"
+                      }
+                    ]
+                  },
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "audience": "https://graph.microsoft.com"
+                  }
+                }
+              }
+            }
+          },
+          "Import_request_succeeded": {
+            "type": "Scope",
+            "actions": {
+              "Imported_device_record": {
+                "type": "Compose",
+                "inputs": "@first(if(empty(body('Graph_import_Autopilot_device')?['value']),createArray(json('{}')),body('Graph_import_Autopilot_device')?['value']))"
+              },
+              "Import_record_has_ID": {
+                "type": "If",
+                "expression": "@not(empty(outputs('Imported_device_record')?['id']))",
+                "actions": {
+                  "Save_initial_import_state": {
+                    "type": "SetVariable",
+                    "inputs": {
+                      "name": "ImportState",
+                      "value": "@coalesce(outputs('Imported_device_record')?['state'],json('{}'))"
+                    }
+                  },
+                  "Wait_for_import_completion": {
+                    "type": "Until",
+                    "expression": "@or(variables('ImportPollError'),equals(variables('ImportState')?['deviceImportStatus'],'complete'),equals(variables('ImportState')?['deviceImportStatus'],'error'))",
+                    "limit": {
+                      "count": 20,
+                      "timeout": "PT10M"
+                    },
+                    "actions": {
+                      "Poll_import_by_ID": {
+                        "type": "Http",
+                        "inputs": {
+                          "uri": "@concat('https://graph.microsoft.com/v1.0/deviceManagement/importedWindowsAutopilotDeviceIdentities/', uriComponent(outputs('Imported_device_record')?['id']))",
+                          "method": "GET",
+                          "headers": {
+                            "Accept": "application/json"
+                          },
+                          "authentication": {
+                            "type": "ManagedServiceIdentity",
+                            "audience": "https://graph.microsoft.com"
+                          },
+                          "retryPolicy": {
+                            "type": "none"
+                          }
+                        }
+                      },
+                      "Process_import_response": {
+                        "type": "If",
+                        "expression": "@equals(outputs('Poll_import_by_ID')?['statusCode'],200)",
+                        "actions": {
+                          "Save_import_state": {
+                            "type": "SetVariable",
+                            "inputs": {
+                              "name": "ImportState",
+                              "value": "@body('Poll_import_by_ID')?['state']"
+                            }
+                          }
+                        },
+                        "else": {
+                          "actions": {
+                            "Save_import_poll_error": {
+                              "type": "SetVariable",
+                              "inputs": {
+                                "name": "ImportPollError",
+                                "value": true
+                              }
+                            }
+                          }
+                        },
+                        "runAfter": {
+                          "Poll_import_by_ID": [
+                            "Succeeded",
+                            "Failed",
+                            "TimedOut"
+                          ]
+                        }
+                      },
+                      "Delay_import_if_pending": {
+                        "type": "If",
+                        "expression": "@and(not(variables('ImportPollError')),not(or(equals(variables('ImportState')?['deviceImportStatus'],'complete'),equals(variables('ImportState')?['deviceImportStatus'],'error'))))",
+                        "actions": {
+                          "Wait_30_seconds_import": {
+                            "type": "Wait",
+                            "inputs": {
+                              "interval": {
+                                "count": 30,
+                                "unit": "Second"
+                              }
+                            }
+                          }
+                        },
+                        "else": {
+                          "actions": {}
+                        },
+                        "runAfter": {
+                          "Process_import_response": [
+                            "Succeeded"
+                          ]
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Save_initial_import_state": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Import_processing_failed": {
+                    "type": "If",
+                    "expression": "@or(variables('ImportPollError'),equals(actions('Wait_for_import_completion').status,'Failed'))",
+                    "actions": {
+                      "Email_import_check_error": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "connection": {
+                              "name": "@parameters('$connections')['outlook']['connectionId']"
+                            }
+                          },
+                          "method": "post",
+                          "body": {
+                            "To": "@variables('SupporterEmail')",
+                            "Subject": "@variables('EmailTemplates')?['Email_import_check_error']?['subject']",
+                            "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_import_check_error']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                            "Importance": "High",
+                            "From": "@variables('NotificationSender')"
+                          },
+                          "path": "/v2/Mail"
+                        }
+                      }
+                    },
+                    "else": {
+                      "actions": {
+                        "Import_completed": {
+                          "type": "If",
+                          "expression": "@and(equals(variables('ImportState')?['deviceImportStatus'],'complete'),not(empty(variables('ImportState')?['deviceRegistrationId'])))",
+                          "actions": {
+                            "Set_profile_deadline": {
+                              "type": "SetVariable",
+                              "inputs": {
+                                "name": "ProfileDeadline",
+                                "value": "@addMinutes(utcNow(),10)"
+                              }
+                            },
+                            "Wait_for_deployment_profile": {
+                              "type": "Until",
+                              "expression": "@or(variables('ProfileAssigned'),variables('ProfilePollError'),greaterOrEquals(variables('ProfileChecks'),20),greaterOrEquals(ticks(utcNow()),ticks(variables('ProfileDeadline'))))",
+                              "limit": {
+                                "count": 20,
+                                "timeout": "PT10M"
+                              },
+                              "actions": {
+                                "Count_profile_check": {
+                                  "type": "IncrementVariable",
+                                  "inputs": {
+                                    "name": "ProfileChecks",
+                                    "value": 1
+                                  }
+                                },
+                                "Poll_profile_by_device_ID": {
+                                  "type": "Http",
+                                  "inputs": {
+                                    "uri": "@concat('https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities/', uriComponent(variables('ImportState')?['deviceRegistrationId']))",
+                                    "method": "GET",
+                                    "headers": {
+                                      "Accept": "application/json"
+                                    },
+                                    "authentication": {
+                                      "type": "ManagedServiceIdentity",
+                                      "audience": "https://graph.microsoft.com"
+                                    },
+                                    "retryPolicy": {
+                                      "type": "none"
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Count_profile_check": [
+                                      "Succeeded"
+                                    ]
+                                  }
+                                },
+                                "Process_profile_response": {
+                                  "type": "If",
+                                  "expression": "@equals(outputs('Poll_profile_by_device_ID')?['statusCode'],200)",
+                                  "actions": {
+                                    "Save_profile_assignment": {
+                                      "type": "SetVariable",
+                                      "inputs": {
+                                        "name": "ProfileAssigned",
+                                        "value": "@equals(body('Poll_profile_by_device_ID')?['deploymentProfileAssignmentStatus'],'assignedInSync')"
+                                      }
+                                    }
+                                  },
+                                  "else": {
+                                    "actions": {
+                                      "Profile_response_is_error": {
+                                        "type": "If",
+                                        "expression": "@not(equals(outputs('Poll_profile_by_device_ID')?['statusCode'],404))",
+                                        "actions": {
+                                          "Save_profile_poll_error": {
+                                            "type": "SetVariable",
+                                            "inputs": {
+                                              "name": "ProfilePollError",
+                                              "value": true
+                                            }
+                                          }
+                                        },
+                                        "else": {
+                                          "actions": {}
+                                        }
+                                      }
+                                    }
+                                  },
+                                  "runAfter": {
+                                    "Poll_profile_by_device_ID": [
+                                      "Succeeded",
+                                      "Failed",
+                                      "TimedOut"
+                                    ]
+                                  }
+                                },
+                                "Delay_profile_if_pending": {
+                                  "type": "If",
+                                  "expression": "@and(not(variables('ProfileAssigned')),not(variables('ProfilePollError')),less(variables('ProfileChecks'),20),less(ticks(utcNow()),ticks(variables('ProfileDeadline'))))",
+                                  "actions": {
+                                    "Wait_until_next_profile_check": {
+                                      "type": "Wait",
+                                      "inputs": {
+                                        "until": {
+                                          "timestamp": "@if(greater(ticks(addSeconds(utcNow(),30)),ticks(variables('ProfileDeadline'))),variables('ProfileDeadline'),addSeconds(utcNow(),30))"
+                                        }
+                                      }
+                                    }
+                                  },
+                                  "else": {
+                                    "actions": {}
+                                  },
+                                  "runAfter": {
+                                    "Process_profile_response": [
+                                      "Succeeded"
+                                    ]
+                                  }
+                                }
+                              },
+                              "runAfter": {
+                                "Set_profile_deadline": [
+                                  "Succeeded"
+                                ]
+                              }
+                            },
+                            "Send_profile_result": {
+                              "type": "If",
+                              "expression": "@equals(variables('ProfileAssigned'),true)",
+                              "actions": {
+                                "Email_device_ready": {
+                                  "type": "ApiConnection",
+                                  "inputs": {
+                                    "host": {
+                                      "connection": {
+                                        "name": "@parameters('$connections')['outlook']['connectionId']"
+                                      }
+                                    },
+                                    "method": "post",
+                                    "body": {
+                                      "To": "@variables('SupporterEmail')",
+                                      "Subject": "@variables('EmailTemplates')?['Email_device_ready']?['subject']",
+                                      "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_device_ready']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                                      "Importance": "Normal",
+                                      "From": "@variables('NotificationSender')"
+                                    },
+                                    "path": "/v2/Mail"
+                                  }
+                                }
+                              },
+                              "else": {
+                                "actions": {
+                                  "Profile_check_failed": {
+                                    "type": "If",
+                                    "expression": "@or(variables('ProfilePollError'),equals(actions('Wait_for_deployment_profile').status,'Failed'))",
+                                    "actions": {
+                                      "Email_profile_check_error": {
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                          "host": {
+                                            "connection": {
+                                              "name": "@parameters('$connections')['outlook']['connectionId']"
+                                            }
+                                          },
+                                          "method": "post",
+                                          "body": {
+                                            "To": "@variables('SupporterEmail')",
+                                            "Subject": "@variables('EmailTemplates')?['Email_profile_check_error']?['subject']",
+                                            "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_profile_check_error']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                                            "Importance": "High",
+                                            "From": "@variables('NotificationSender')"
+                                          },
+                                          "path": "/v2/Mail"
+                                        }
+                                      }
+                                    },
+                                    "else": {
+                                      "actions": {
+                                        "Email_profile_pending": {
+                                          "type": "ApiConnection",
+                                          "inputs": {
+                                            "host": {
+                                              "connection": {
+                                                "name": "@parameters('$connections')['outlook']['connectionId']"
+                                              }
+                                            },
+                                            "method": "post",
+                                            "body": {
+                                              "To": "@variables('SupporterEmail')",
+                                              "Subject": "@variables('EmailTemplates')?['Email_profile_pending']?['subject']",
+                                              "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_profile_pending']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                                              "Importance": "Normal",
+                                              "From": "@variables('NotificationSender')"
+                                            },
+                                            "path": "/v2/Mail"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "runAfter": {
+                                "Wait_for_deployment_profile": [
+                                  "Succeeded",
+                                  "Failed",
+                                  "TimedOut"
+                                ]
+                              }
+                            }
+                          },
+                          "else": {
+                            "actions": {
+                              "Import_reported_error": {
+                                "type": "If",
+                                "expression": "@equals(variables('ImportState')?['deviceImportStatus'],'error')",
+                                "actions": {
+                                  "Email_import_device_error": {
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                      "host": {
+                                        "connection": {
+                                          "name": "@parameters('$connections')['outlook']['connectionId']"
+                                        }
+                                      },
+                                      "method": "post",
+                                      "body": {
+                                        "To": "@variables('SupporterEmail')",
+                                        "Subject": "@variables('EmailTemplates')?['Email_import_device_error']?['subject']",
+                                        "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_import_device_error']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                                        "Importance": "High",
+                                        "From": "@variables('NotificationSender')"
+                                      },
+                                      "path": "/v2/Mail"
+                                    }
+                                  }
+                                },
+                                "else": {
+                                  "actions": {
+                                    "Email_import_pending": {
+                                      "type": "ApiConnection",
+                                      "inputs": {
+                                        "host": {
+                                          "connection": {
+                                            "name": "@parameters('$connections')['outlook']['connectionId']"
+                                          }
+                                        },
+                                        "method": "post",
+                                        "body": {
+                                          "To": "@variables('SupporterEmail')",
+                                          "Subject": "@variables('EmailTemplates')?['Email_import_pending']?['subject']",
+                                          "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_import_pending']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                                          "Importance": "Normal",
+                                          "From": "@variables('NotificationSender')"
+                                        },
+                                        "path": "/v2/Mail"
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Wait_for_import_completion": [
+                        "Succeeded",
+                        "Failed",
+                        "TimedOut"
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "actions": {
+                    "Email_missing_import_ID": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['outlook']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "body": {
+                          "To": "@variables('SupporterEmail')",
+                          "Subject": "@variables('EmailTemplates')?['Email_missing_import_ID']?['subject']",
+                          "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_missing_import_ID']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                          "Importance": "High",
+                          "From": "@variables('NotificationSender')"
+                        },
+                        "path": "/v2/Mail"
+                      }
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Imported_device_record": [
+                    "Succeeded"
+                  ]
+                }
+              }
+            },
+            "runAfter": {
+              "Import_device_scope": [
+                "Succeeded"
+              ]
+            }
+          },
+          "Email_import_request_failed": {
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['outlook']['connectionId']"
+                }
+              },
+              "method": "post",
+              "body": {
+                "To": "@variables('SupporterEmail')",
+                "Subject": "@variables('EmailTemplates')?['Email_import_request_failed']?['subject']",
+                "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_import_request_failed']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                "Importance": "High",
+                "From": "@variables('NotificationSender')"
+              },
+              "path": "/v2/Mail"
+            },
+            "runAfter": {
+              "Import_device_scope": [
+                "Failed",
+                "TimedOut"
+              ]
+            }
+          }
+        },
+        "else": {
+          "actions": {
+            "Email_missing_fields": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['outlook']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "body": {
+                  "To": "@variables('SupporterEmail')",
+                  "Subject": "@variables('EmailTemplates')?['Email_missing_fields']?['subject']",
+                  "Body": "<p>@{variables('EmailGreeting')}</p><p>@{variables('EmailTemplates')?['Email_missing_fields']?['body']}</p><p>Device serial number: @{triggerBody()?['serialNumber']}</p><p>@{variables('EmailClosing')}</p>",
+                  "Importance": "High",
+                  "From": "@variables('NotificationSender')"
+                },
+                "path": "/v2/Mail"
+              }
+            }
+          }
+        },
+        "runAfter": {
+          "Initialize_status_variables": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {},
+    "parameters": {
+      "SupportEmail": {
+        "defaultValue": "replace-with-your-support-mailbox@example.com",
+        "type": "String"
+      },
+      "$connections": {
+        "type": "Object",
+        "defaultValue": {}
+      },
+      "NotificationSender": {
+        "type": "String",
+        "defaultValue": "workplace@example.com"
+      },
+      "EmailGreeting": {
+        "type": "String",
+        "defaultValue": "Dear supporter,"
+      },
+      "EmailClosing": {
+        "type": "String",
+        "defaultValue": "Regards,<br/>Workplace"
+      },
+      "EmailTemplates": {
+        "type": "Object",
+        "defaultValue": {
+          "Email_import_check_error": {
+            "subject": "Windows Autopilot import status check failed",
+            "body": "We could not verify whether the device import completed. Please contact Workplace and review the workflow run history."
+          },
+          "Email_device_ready": {
+            "subject": "Windows Autopilot device is ready",
+            "body": "The device was registered successfully and its deployment profile is assigned. You can proceed with employee handover."
+          },
+          "Email_profile_check_error": {
+            "subject": "Windows Autopilot profile check failed",
+            "body": "The device was imported, but we could not verify deployment-profile assignment. Please contact Workplace before handing over the device."
+          },
+          "Email_profile_pending": {
+            "subject": "Windows Autopilot deployment profile is still pending",
+            "body": "The device was imported, but its deployment profile is still pending. Please check Intune or contact Workplace before handing over the device."
+          },
+          "Email_import_device_error": {
+            "subject": "Windows Autopilot import failed",
+            "body": "Windows Autopilot reported that the device import failed. Please contact Workplace and review the workflow run history before retrying."
+          },
+          "Email_import_pending": {
+            "subject": "Windows Autopilot import is still pending",
+            "body": "The device import is still pending or completion could not be confirmed. Please check Intune or contact Workplace before retrying."
+          },
+          "Email_missing_import_ID": {
+            "subject": "Windows Autopilot import response is incomplete",
+            "body": "The import response did not contain a device import ID. Please contact Workplace and review the workflow run history."
+          },
+          "Email_import_request_failed": {
+            "subject": "Windows Autopilot import request failed",
+            "body": "The device import request failed or timed out. Please contact Workplace and review the workflow run history before retrying."
+          },
+          "Email_missing_fields": {
+            "subject": "Windows Autopilot request is incomplete",
+            "body": "The submission is incomplete. A group tag, serial number and hardware identifier are required. Please correct the submission and retry."
+          }
+        }
+      }
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "type": "Object",
+      "value": {
+        "outlook": {
+          "id": "/subscriptions/YOUR_SUBSCRIPTION_ID/providers/Microsoft.Web/locations/YOUR_AZURE_REGION/managedApis/office365",
+          "connectionId": "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/YOUR_RESOURCE_GROUP/providers/Microsoft.Web/connections/YOUR_OUTLOOK_CONNECTION_NAME",
+          "connectionName": "YOUR_OUTLOOK_CONNECTION_NAME",
+          "connectionProperties": {}
+        }
+      }
+    }
+  }
+}
